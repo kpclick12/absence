@@ -1,0 +1,31 @@
+project:
+  output_dir: artifacts
+  random_seed: 42
+  school_year_start_month: 8
+
+data:
+  attendance_events: data/attendance_events.parquet
+  student_schedule: data/student_schedule.parquet
+  school_calendar: data/school_calendar.parquet
+
+modeling:
+  substantial_absence_threshold: 0.5
+  short_horizon_school_days: 5
+  lesson_horizon_school_days: 5
+  top_k_fractions: [0.01, 0.02, 0.05]
+  minimum_rows_for_ebm: 500
+  train_negative_to_positive_ratio: 5.0
+  max_train_rows_per_task: 250000
+
+experiments:
+  - name: backtest_a
+    train_years: ["2022/23"]
+    validation_years: ["2023/24"]
+  - name: backtest_b
+    train_years: ["2022/23", "2023/24"]
+    validation_years: ["2024/25"]
+  - name: final_test
+    train_years: ["2022/23", "2023/24"]
+    validation_years: ["2024/25"]
+    test_years: ["2025/26"]
+    production_refit_years: ["2022/23", "2023/24", "2024/25"]

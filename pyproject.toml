@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "absence-modeling"
+version = "0.1.0"
+description = "Municipality-wide student absence modeling pipelines for next-day, chronic, and lesson risk."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "joblib>=1.4.2",
+  "numpy>=2.1.0",
+  "pandas>=2.2.3",
+  "pyarrow>=18.1.0",
+  "pyyaml>=6.0.2",
+  "scikit-learn>=1.6.1",
+]
+
+[project.optional-dependencies]
+ebm = [
+  "interpret>=0.6.7",
+]
+dev = [
+  "pytest>=8.3.4",
+]
+
+[project.scripts]
+absence-model = "absence_modeling.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
