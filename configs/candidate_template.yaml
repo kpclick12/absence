@@ -1,0 +1,67 @@
+# Candidate config template for the experiment search loop.
+# Copy this to experiments/001/config.yaml and edit before running:
+#   python scripts/run_experiment.py --config configs/real.yaml --candidate experiments/001/
+#
+# After each run, read experiments/search_log.tsv and experiments/001/importance.json
+# to decide what to change in the next candidate.
+
+# Task to optimize. One of:
+#   short_horizon | chronic_10 | chronic_20 | chronic_year_10 | chronic_year_20 | lesson
+task: chronic_10
+
+# Which experiment split to use (must match a name in the global config's experiments list)
+experiment: backtest_a
+
+# Feature groups to include. Remove low-importance groups between iterations.
+# Valid groups (use only groups relevant to this task):
+#
+#   General (all tasks):
+#     daily_raw         - daily missed/giltig/ogiltig/partial ratios (8 features)
+#     rolling_short     - 1d/3d/5d rolling windows (15 features)
+#     rolling_long      - 10d/20d rolling windows (10 features)
+#     streaks           - streak counters and days-since (4 features)
+#     trend             - 5d vs 20d missed ratio trend (1 feature)
+#     term_cumulative   - term-to-date cumulative ratios (3 features)
+#     prior_year        - prior year annual summary (5 features)
+#     calendar          - break gaps and weekend effects (3 features)
+#
+#   Chronic tasks only (chronic_10, chronic_20, chronic_year_*):
+#     gap_to_threshold  - distance to 10%/20% thresholds (2 features)
+#
+#   Short-horizon only:
+#     schedule_future   - upcoming week load (7 features)
+#     schedule_next_day - next day schedule details (9 features)
+#
+#   Chronic year tasks only:
+#     year_level        - school-year cumulative + term-1 actuals (11 features)
+#
+#   Lesson task only:
+#     lesson_target     - target lesson details (9 features)
+#     lesson_history    - historical subject/time/weekday patterns (8 features)
+feature_groups:
+  - daily_raw
+  - rolling_short
+  - rolling_long
+  - streaks
+  - trend
+  - term_cumulative
+  - prior_year
+  - calendar
+  - gap_to_threshold
+
+# Model specification
+model:
+  type: logistic     # logistic | ebm
+  C: 1.0             # regularization strength (lower = more regularized)
+  class_weight: balanced
+
+# Row sampling for fast search iterations.
+# Use sample_fraction < 1.0 and/or max_rows to cap training time.
+# For finalize mode (--finalize flag), sampling is ignored.
+sample_fraction: 0.5    # fraction of training rows to use (0.0-1.0)
+max_rows: 50000         # hard cap on training rows after sampling
+
+seed: 42
+
+# Free-text notes - describe what changed vs. the previous candidate
+notes: "Baseline - all feature groups, logistic C=1.0"

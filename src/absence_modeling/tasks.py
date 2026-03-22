@@ -7,7 +7,7 @@ import pandas as pd
 
 from .config import AppConfig
 from .preprocessing import PreparedData
-from .utils import FeatureBundle, safe_divide
+from .utils import FeatureBundle, academic_year_from_date, safe_divide
 
 
 STUDENT_DAY_NUMERIC_FEATURES = [
@@ -100,6 +100,22 @@ SHORT_HORIZON_CATEGORICAL_FEATURES = STUDENT_DAY_CATEGORICAL_FEATURES + [
 CHRONIC_NUMERIC_FEATURES = STUDENT_DAY_NUMERIC_FEATURES + [
     "gap_to_10pct",
     "gap_to_20pct",
+]
+
+CHRONIC_LASYAR_NUMERIC_FEATURES = STUDENT_DAY_NUMERIC_FEATURES + [
+    "gap_to_10pct",
+    "gap_to_20pct",
+    "year_cumulative_missed_ratio",
+    "gap_to_year_10pct",
+    "gap_to_year_20pct",
+    "is_term2",
+    "term1_actual_missed_ratio",
+    "term1_actual_giltig_ratio",
+    "term1_actual_ogiltig_ratio",
+    "year_school_days_elapsed",
+    "year_total_school_days",
+    "year_progress_ratio",
+    "year_days_remaining",
 ]
 
 LESSON_NUMERIC_FEATURES = STUDENT_DAY_NUMERIC_FEATURES + CALENDAR_GAP_FEATURES + [
@@ -528,10 +544,108 @@ def build_lesson_dataset(prepared: PreparedData, config: AppConfig, years: list[
     )
 
 
+def build_chronic_lasyar_dataset(
+    prepared: PreparedData,
+    threshold: float,
+    config: AppConfig,
+    years: list[str] | None = None,
+) -> TaskDataset:
+    student_day = _add_common_columns(prepared.student_day)
+
+    # Year-end target: total missed / total recorded across all terms in the academic year
+    year_totals = (
+        student_day.groupby(["student_id", "academic_year"], as_index=False)
+        .agg(
+            final_year_missed_minutes=("daily_missed_minutes", "sum"),
+            final_year_recorded_minutes=("daily_recorded_minutes", "sum"),
+        )
+        .assign(
+            final_year_missed_ratio=lambda f: safe_divide(
+                f["final_year_missed_minutes"], f["final_year_recorded_minutes"]
+            )
+        )
+    )
+    frame = student_day.merge(year_totals, on=["student_id", "academic_year"], how="left")
+    target_column = f"target_chronic_year_{int(threshold * 100)}"
+    frame[target_column] = (frame["final_year_missed_ratio"] >= threshold).astype(int)
+
+    # Term-level gap features (same as chronic model)
+    frame["gap_to_10pct"] = 0.10 - frame["term_cumulative_missed_ratio"]
+    frame["gap_to_20pct"] = 0.20 - frame["term_cumulative_missed_ratio"]
+
+    # Year-cumulative missed ratio (resets only at academic year boundary, not at each term)
+    frame = frame.sort_values(["student_id", "academic_year", "date"])
+    year_cum_missed = frame.groupby(["student_id", "academic_year"])["daily_missed_minutes"].cumsum()
+    year_cum_recorded = frame.groupby(["student_id", "academic_year"])["daily_recorded_minutes"].cumsum()
+    frame["year_cumulative_missed_ratio"] = safe_divide(year_cum_missed, year_cum_recorded)
+    frame["gap_to_year_10pct"] = 0.10 - frame["year_cumulative_missed_ratio"]
+    frame["gap_to_year_20pct"] = 0.20 - frame["year_cumulative_missed_ratio"]
+
+    # is_term2: spring term rows (Jan-Jul when school year starts in Aug)
+    frame["is_term2"] = (
+        pd.to_datetime(frame["date"]).dt.month < config.project.school_year_start_month
+    ).astype(float)
+
+    # Term-1 actuals: the final state of term-1 cumulative ratios, used as features in term 2
+    term1_finals = (
+        frame[frame["is_term2"] == 0]
+        .sort_values("date")
+        .groupby(["student_id", "academic_year"], as_index=False)
+        .last()[["student_id", "academic_year", "term_cumulative_missed_ratio", "term_cumulative_giltig_ratio", "term_cumulative_ogiltig_ratio"]]
+        .rename(columns={
+            "term_cumulative_missed_ratio": "term1_actual_missed_ratio",
+            "term_cumulative_giltig_ratio": "term1_actual_giltig_ratio",
+            "term_cumulative_ogiltig_ratio": "term1_actual_ogiltig_ratio",
+        })
+    )
+    frame = frame.merge(term1_finals, on=["student_id", "academic_year"], how="left")
+    # In term-1 rows, term 1 is not yet complete so zero out the actuals
+    for col in ("term1_actual_missed_ratio", "term1_actual_giltig_ratio", "term1_actual_ogiltig_ratio"):
+        frame.loc[frame["is_term2"] == 0, col] = 0.0
+        frame[col] = frame[col].fillna(0.0)
+
+    # Year progress features from calendar
+    calendar = prepared.calendar.copy()
+    calendar["academic_year"] = academic_year_from_date(
+        pd.to_datetime(calendar["date"]), config.project.school_year_start_month
+    )
+    year_calendar_totals = (
+        calendar[calendar["is_instructional_day"]]
+        .groupby(["school_id", "academic_year"], as_index=False)
+        .agg(year_total_school_days=("date", "nunique"))
+    )
+    frame["year_school_days_elapsed"] = frame.groupby(["student_id", "academic_year"]).cumcount() + 1
+    frame = frame.merge(year_calendar_totals, on=["school_id", "academic_year"], how="left")
+    frame["year_progress_ratio"] = safe_divide(frame["year_school_days_elapsed"], frame["year_total_school_days"])
+    frame["year_days_remaining"] = frame["year_total_school_days"] - frame["year_school_days_elapsed"]
+
+    frame = _filter_years(frame, years)
+
+    feature_columns = CHRONIC_LASYAR_NUMERIC_FEATURES + STUDENT_DAY_CATEGORICAL_FEATURES
+    features = FeatureBundle(
+        frame=frame,
+        numeric_features=CHRONIC_LASYAR_NUMERIC_FEATURES,
+        categorical_features=STUDENT_DAY_CATEGORICAL_FEATURES,
+    )
+    return TaskDataset(
+        name=f"chronic_year_{int(threshold * 100)}",
+        frame=_select_unique_columns(
+            frame,
+            ["date", "student_id", "school_id", "class_id", "grade", "stage", "term_id", "academic_year", target_column]
+            + feature_columns,
+        ),
+        target_column=target_column,
+        features=features,
+        id_columns=["date", "student_id", "school_id", "class_id", "grade", "stage", "term_id", "academic_year"],
+    )
+
+
 def build_all_task_datasets(prepared: PreparedData, config: AppConfig, years: list[str] | None = None) -> dict[str, TaskDataset]:
     return {
         "short_horizon": build_short_horizon_dataset(prepared, config, years),
         "chronic_10": build_chronic_dataset(prepared, 0.10, years),
         "chronic_20": build_chronic_dataset(prepared, 0.20, years),
+        "chronic_year_10": build_chronic_lasyar_dataset(prepared, 0.10, config, years),
+        "chronic_year_20": build_chronic_lasyar_dataset(prepared, 0.20, config, years),
         "lesson": build_lesson_dataset(prepared, config, years),
     }

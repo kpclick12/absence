@@ -75,7 +75,12 @@ class TrainedModel:
         return joblib.load(path)
 
 
-def _logistic_pipeline(task: TaskDataset, random_seed: int) -> Pipeline:
+def _logistic_pipeline(
+    task: TaskDataset,
+    random_seed: int,
+    C: float = 1.0,
+    class_weight: str = "balanced",
+) -> Pipeline:
     preprocess = ColumnTransformer(
         transformers=[
             (
@@ -103,8 +108,8 @@ def _logistic_pipeline(task: TaskDataset, random_seed: int) -> Pipeline:
     classifier = LogisticRegression(
         solver="saga",
         max_iter=2000,
-        C=1.0,
-        class_weight="balanced",
+        C=C,
+        class_weight=class_weight,
         random_state=random_seed,
     )
     return Pipeline([("preprocess", preprocess), ("classifier", classifier)])
@@ -133,9 +138,19 @@ def _ebm_pipeline(task: TaskDataset, random_seed: int) -> Pipeline | None:
     return Pipeline([("preprocess", preprocess), ("classifier", classifier)])
 
 
-def _candidate_pipeline(candidate_name: str, task: TaskDataset, random_seed: int) -> Pipeline:
+def _candidate_pipeline(
+    candidate_name: str,
+    task: TaskDataset,
+    random_seed: int,
+    hyperparams: dict[str, Any] | None = None,
+) -> Pipeline:
+    hp = hyperparams or {}
     if candidate_name == "logistic":
-        return _logistic_pipeline(task, random_seed)
+        return _logistic_pipeline(
+            task, random_seed,
+            C=float(hp.get("C", 1.0)),
+            class_weight=str(hp.get("class_weight", "balanced")),
+        )
     if candidate_name == "ebm":
         pipeline = _ebm_pipeline(task, random_seed)
         if pipeline is None:
@@ -231,6 +246,46 @@ def train_task_model(
         metadata={"candidate_records": candidate_records},
     )
     return trained, candidate_records
+
+
+def train_search_model(
+    task: TaskDataset,
+    train_frame: pd.DataFrame,
+    validation_frame: pd.DataFrame,
+    config: AppConfig,
+    model_type: str = "logistic",
+    hyperparams: dict[str, Any] | None = None,
+) -> tuple[TrainedModel, dict[str, Any]]:
+    """
+    Train a single specified model type (for the search loop).
+    Unlike train_task_model, does not try multiple candidates.
+    Returns (TrainedModel, metrics_dict).
+    """
+    x_columns = task.features.numeric_features + task.features.categorical_features
+    train_sample = _sample_training_rows(train_frame, task.target_column, config)
+    pipeline = _candidate_pipeline(model_type, task, config.project.random_seed, hyperparams)
+    pipeline.fit(train_sample[x_columns], train_sample[task.target_column])
+
+    validation_probs = pipeline.predict_proba(validation_frame[x_columns])[:, 1]
+    metrics = binary_metrics(
+        validation_frame.assign(raw_score=validation_probs),
+        task.target_column,
+        "raw_score",
+        config.modeling.top_k_fractions,
+    )
+
+    stage_calibrators, global_calibrator = _fit_calibrators(validation_probs, validation_frame, task.target_column)
+    trained = TrainedModel(
+        task_name=task.name,
+        candidate_name=model_type,
+        model=pipeline,
+        numeric_features=task.features.numeric_features,
+        categorical_features=task.features.categorical_features,
+        stage_calibrators=stage_calibrators,
+        global_calibrator=global_calibrator,
+        metadata={"hyperparams": hyperparams or {}},
+    )
+    return trained, metrics
 
 
 def refit_selected_model(

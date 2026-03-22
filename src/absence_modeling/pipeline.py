@@ -130,6 +130,8 @@ def score_class(
     short_horizon_model = TrainedModel.load(production_dir / "short_horizon.joblib")
     chronic_10_model = TrainedModel.load(production_dir / "chronic_10.joblib")
     chronic_20_model = TrainedModel.load(production_dir / "chronic_20.joblib")
+    chronic_year_10_model = TrainedModel.load(production_dir / "chronic_year_10.joblib")
+    chronic_year_20_model = TrainedModel.load(production_dir / "chronic_year_20.joblib")
     lesson_model = TrainedModel.load(production_dir / "lesson.joblib")
 
     short_horizon_predictions = scoring_frames.short_horizon[
@@ -142,6 +144,11 @@ def score_class(
     chronic_predictions["risk_10pct_term_end"] = chronic_10_model.predict_proba(scoring_frames.chronic)
     chronic_predictions["risk_20pct_term_end"] = chronic_20_model.predict_proba(scoring_frames.chronic)
     chronic_predictions = chronic_predictions.sort_values("risk_20pct_term_end", ascending=False)
+
+    chronic_lasyar_predictions = scoring_frames.chronic_lasyar[["date", "student_id", "school_id", "class_id", "grade", "stage"]].copy()
+    chronic_lasyar_predictions["risk_10pct_year_end"] = chronic_year_10_model.predict_proba(scoring_frames.chronic_lasyar)
+    chronic_lasyar_predictions["risk_20pct_year_end"] = chronic_year_20_model.predict_proba(scoring_frames.chronic_lasyar)
+    chronic_lasyar_predictions = chronic_lasyar_predictions.sort_values("risk_20pct_year_end", ascending=False)
 
     lesson_predictions = scoring_frames.lesson[
         ["score_date", "target_date", "student_id", "school_id", "class_id", "grade", "stage", "lesson_id", "target_subject", "target_lesson_start_minutes"]
@@ -162,11 +169,13 @@ def score_class(
     outputs = {
         "short_horizon_predictions": scoring_dir / "short_horizon_predictions.parquet",
         "chronic_predictions": scoring_dir / "chronic_predictions.parquet",
+        "chronic_lasyar_predictions": scoring_dir / "chronic_lasyar_predictions.parquet",
         "lesson_predictions": scoring_dir / "lesson_predictions.parquet",
         "lesson_expected_absence": scoring_dir / "lesson_expected_absence.parquet",
     }
     write_frame(short_horizon_predictions, outputs["short_horizon_predictions"])
     write_frame(chronic_predictions, outputs["chronic_predictions"])
+    write_frame(chronic_lasyar_predictions, outputs["chronic_lasyar_predictions"])
     write_frame(lesson_predictions, outputs["lesson_predictions"])
     write_frame(lesson_expected_absence, outputs["lesson_expected_absence"])
     return outputs

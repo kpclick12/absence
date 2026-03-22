@@ -6,8 +6,10 @@ import pandas as pd
 
 from .config import AppConfig
 from .preprocessing import PreparedData
+from .utils import academic_year_from_date, safe_divide
 from .tasks import (
     CALENDAR_GAP_FEATURES,
+    CHRONIC_LASYAR_NUMERIC_FEATURES,
     CHRONIC_NUMERIC_FEATURES,
     LESSON_CATEGORICAL_FEATURES,
     LESSON_NUMERIC_FEATURES,
@@ -37,6 +39,7 @@ def _select_unique_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataFr
 class ClassScoreFrames:
     short_horizon: pd.DataFrame
     chronic: pd.DataFrame
+    chronic_lasyar: pd.DataFrame
     lesson: pd.DataFrame
 
 
@@ -216,4 +219,68 @@ def build_class_scoring_frames(
         + LESSON_NUMERIC_FEATURES
         + LESSON_CATEGORICAL_FEATURES,
     )
-    return ClassScoreFrames(short_horizon=short_horizon, chronic=chronic, lesson=lesson_scoring)
+
+    # Läsår (school-year) chronic scoring frame
+    all_student_day = _add_common_columns(student_day)
+    current_year = current_day["academic_year"].iloc[0] if not current_day.empty else None
+    year_rows = all_student_day[
+        (all_student_day["student_id"].isin(current_day["student_id"]))
+        & (all_student_day["academic_year"] == current_year)
+        & (all_student_day["date"] <= scoring_date)
+    ].copy()
+
+    year_rows = year_rows.sort_values(["student_id", "date"])
+    year_cum_missed = year_rows.groupby("student_id")["daily_missed_minutes"].cumsum()
+    year_cum_recorded = year_rows.groupby("student_id")["daily_recorded_minutes"].cumsum()
+    year_rows["year_cumulative_missed_ratio"] = safe_divide(year_cum_missed, year_cum_recorded)
+    year_rows["gap_to_year_10pct"] = 0.10 - year_rows["year_cumulative_missed_ratio"]
+    year_rows["gap_to_year_20pct"] = 0.20 - year_rows["year_cumulative_missed_ratio"]
+    year_rows["is_term2"] = (
+        year_rows["date"].dt.month < config.project.school_year_start_month
+    ).astype(float)
+
+    term1_finals = (
+        year_rows[year_rows["is_term2"] == 0]
+        .sort_values("date")
+        .groupby("student_id", as_index=False)
+        .last()[["student_id", "term_cumulative_missed_ratio", "term_cumulative_giltig_ratio", "term_cumulative_ogiltig_ratio"]]
+        .rename(columns={
+            "term_cumulative_missed_ratio": "term1_actual_missed_ratio",
+            "term_cumulative_giltig_ratio": "term1_actual_giltig_ratio",
+            "term_cumulative_ogiltig_ratio": "term1_actual_ogiltig_ratio",
+        })
+    )
+    year_rows = year_rows.merge(term1_finals, on="student_id", how="left")
+    for col in ("term1_actual_missed_ratio", "term1_actual_giltig_ratio", "term1_actual_ogiltig_ratio"):
+        year_rows.loc[year_rows["is_term2"] == 0, col] = 0.0
+        year_rows[col] = year_rows[col].fillna(0.0)
+
+    year_rows["year_school_days_elapsed"] = year_rows.groupby("student_id").cumcount() + 1
+    scoring_calendar = prepared.calendar.copy()
+    scoring_calendar["academic_year"] = academic_year_from_date(
+        pd.to_datetime(scoring_calendar["date"]), config.project.school_year_start_month
+    )
+    year_calendar_totals = (
+        scoring_calendar[scoring_calendar["is_instructional_day"]]
+        .groupby(["school_id", "academic_year"], as_index=False)
+        .agg(year_total_school_days=("date", "nunique"))
+    )
+    year_rows = year_rows.merge(year_calendar_totals, on=["school_id", "academic_year"], how="left")
+    year_rows["year_progress_ratio"] = safe_divide(
+        year_rows["year_school_days_elapsed"], year_rows["year_total_school_days"]
+    )
+    year_rows["year_days_remaining"] = year_rows["year_total_school_days"] - year_rows["year_school_days_elapsed"]
+    year_rows["gap_to_10pct"] = 0.10 - year_rows["term_cumulative_missed_ratio"]
+    year_rows["gap_to_20pct"] = 0.20 - year_rows["term_cumulative_missed_ratio"]
+
+    # Take only the scoring-date row per student
+    chronic_lasyar = year_rows[year_rows["date"] == scoring_date].copy()
+    chronic_lasyar = _cohort_filter(chronic_lasyar, school_id, class_id)
+    chronic_lasyar = _select_unique_columns(
+        chronic_lasyar,
+        ["date", "student_id", "school_id", "class_id", "grade", "stage"]
+        + CHRONIC_LASYAR_NUMERIC_FEATURES
+        + STUDENT_DAY_CATEGORICAL_FEATURES,
+    )
+
+    return ClassScoreFrames(short_horizon=short_horizon, chronic=chronic, chronic_lasyar=chronic_lasyar, lesson=lesson_scoring)

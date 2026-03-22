@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.inspection import permutation_importance as sklearn_permutation_importance
 from sklearn.metrics import average_precision_score, brier_score_loss
 
 
@@ -34,6 +36,38 @@ def binary_metrics(
     for fraction in fractions:
         metrics[f"precision_at_{fraction:.2f}"] = precision_at_fraction(y_true, y_score, fraction)
     return metrics
+
+
+def compute_permutation_importance(
+    model: Any,
+    frame: pd.DataFrame,
+    target_column: str,
+    feature_names: list[str],
+    n_repeats: int = 5,
+    random_state: int = 42,
+) -> dict[str, float]:
+    """
+    Compute permutation importance for a fitted model on the given frame.
+
+    Returns a dict of feature_name -> mean importance score (decrease in precision@1%).
+    Positive score = feature matters. Near-zero = can safely drop.
+    """
+    x = frame[feature_names].copy()
+    y = frame[target_column].to_numpy(dtype=float)
+
+    def scorer(estimator: Any, x_eval: pd.DataFrame, y_eval: np.ndarray) -> float:
+        probs = estimator.predict_proba(x_eval)[:, 1]
+        return precision_at_fraction(y_eval, probs, 0.05)
+
+    result = sklearn_permutation_importance(
+        model,
+        x,
+        y,
+        scoring=scorer,
+        n_repeats=n_repeats,
+        random_state=random_state,
+    )
+    return {name: float(score) for name, score in zip(feature_names, result.importances_mean, strict=True)}
 
 
 def subgroup_metrics(
